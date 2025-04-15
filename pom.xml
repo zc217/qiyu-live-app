@@ -13,6 +13,7 @@
         <module>qiyu-live-user-interface</module>
         <module>qiyu-live-user-provider</module>
         <module>qiyu-live-api</module>
+        <module>qiyu-live-common-interface</module>
     </modules>
 
     <properties>
