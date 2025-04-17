@@ -1,0 +1,9 @@
+dubbo:
+  application:
+    name: qiyu-live-api
+    qos-enable: false
+  registry:
+    address: nacos://127.0.0.1:8848?namespace=qiyu-live-test&&username=nacos&&password=nacos
+
+#dubbo.application.name=qiyu-live-user-application
+#dubbo.registry.address=nacos://127.0.0.1:8848?namespace=qiyu-live-test&&username=nacos&&password=nacos
