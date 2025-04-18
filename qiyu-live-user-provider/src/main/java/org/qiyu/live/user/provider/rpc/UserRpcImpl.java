@@ -7,6 +7,9 @@ import org.qiyu.live.user.interfaces.IUserRpc;
 import org.qiyu.live.user.provider.dao.mapper.IUserMapper;
 import org.qiyu.live.user.provider.service.IUserService;
 
+import java.util.List;
+import java.util.Map;
+
 @DubboService
 public class UserRpcImpl implements IUserRpc {
     
@@ -27,6 +30,12 @@ public class UserRpcImpl implements IUserRpc {
     public boolean insertOne(UserDTO userDTO) {
         return userService.insertOne(userDTO);
     }
+
+    @Override
+    public Map<Long, UserDTO> batchQueryUserInfo(List<Long> userIdList) {
+        return userService.batchQueryUserInfo(userIdList);
+    }
+
 
     @Override
     public String test() {
