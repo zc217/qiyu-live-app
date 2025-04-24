@@ -5,14 +5,13 @@ import org.qiyu.live.id.generate.provider.dao.mapper.IdGenerateMapper;
 import org.qiyu.live.id.generate.provider.dao.po.IdGeneratePO;
 import org.qiyu.live.id.generate.provider.service.IdGenerateService;
 import org.qiyu.live.id.generate.provider.service.bo.LocalSeqIdBo;
+import org.qiyu.live.id.generate.provider.service.bo.LocalUnSeqIdBo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.stereotype.Service;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -27,6 +26,8 @@ public class IdGenerateServiceImpl implements IdGenerateService, InitializingBea
 
     private static Map<Integer, LocalSeqIdBo> localSeqIdBoMap = new ConcurrentHashMap<>();
 
+    private static Map<Integer, LocalUnSeqIdBo> localUnSeqIdBoMap = new ConcurrentHashMap<>();
+
     private static ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(8, 16, 3, TimeUnit.SECONDS, new ArrayBlockingQueue<>(1000),
             new ThreadFactory() {
                 @Override
@@ -38,7 +39,30 @@ public class IdGenerateServiceImpl implements IdGenerateService, InitializingBea
             });
     private static final float UPDATE_RATE = 0.75f;
 
+    private static final int SEQ_ID = 1;
+
     private static Map<Integer, Semaphore> semaphoreMap = new ConcurrentHashMap<>();
+
+    @Override
+    public Long getUnSeqId(Integer id) {
+        if (id == null) {
+            logger.error("[getUnSeqId] id is null,id is {}", id);
+            return null;
+        }
+        LocalUnSeqIdBo localUnSeqIdBo = localUnSeqIdBoMap.get(id);
+        if (localUnSeqIdBo == null) {
+            logger.error("[getUnSeqId] localUnSeqIdBo is null,id is {}", id);
+            return null;
+        }
+        Long returnId = localUnSeqIdBo.getIdQueue().poll();
+        if (returnId == null) {
+            logger.error("[getUnSeqId] returnId is null,id is {}", id);
+            return null;
+        }
+        this.refreshLocalUnSeqId(localUnSeqIdBo);
+        return returnId;
+    }
+
 
     @Override
     public Long getSeqId(Integer id) {
@@ -52,11 +76,11 @@ public class IdGenerateServiceImpl implements IdGenerateService, InitializingBea
             return null;
         }
         this.refreshLocalSeqId(localSeqIdBo);
-        if (localSeqIdBo.getCurrentNum().get() > localSeqIdBo.getNextThreshold()){
+        long returnId = localSeqIdBo.getCurrentNum().incrementAndGet();
+        if (returnId > localSeqIdBo.getNextThreshold()) {
             logger.error("[getSeqId] id is over limit,id is {}", id);
             return null;
         }
-        long returnId = localSeqIdBo.getCurrentNum().getAndIncrement();
         return returnId;
     }
 
@@ -90,9 +114,34 @@ public class IdGenerateServiceImpl implements IdGenerateService, InitializingBea
         }
     }
 
-    @Override
-    public Long getUnSeqId(Integer id) {
-        return null;
+    private void refreshLocalUnSeqId(LocalUnSeqIdBo localUnSeqIdBo) {
+        long begin = localUnSeqIdBo.getCurrentStart();
+        long end = localUnSeqIdBo.getNextThreshold();
+        long remainSize = localUnSeqIdBo.getIdQueue().size();
+        if ((end - begin) * 0.25 > remainSize) {
+            Semaphore semaphore = semaphoreMap.get(localUnSeqIdBo.getId());
+            if (semaphore == null) {
+                logger.error("semaphore is null,id is {}", localUnSeqIdBo.getId());
+                return;
+            }
+            boolean acquireStatus = semaphore.tryAcquire();
+            if (acquireStatus) {
+                threadPoolExecutor.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            IdGeneratePO idGeneratePO = idGenerateMapper.selectById(localUnSeqIdBo.getId());
+                            tryUpdateMySQLRecord(idGeneratePO);
+                        } catch (Exception e) {
+                            logger.error("[refreshLocalUnSeqId] error is ", e);
+                        } finally {
+                            semaphoreMap.get(localUnSeqIdBo.getId()).release();
+                            logger.info("本地无序id段同步完成,id is {}", localUnSeqIdBo.getId());
+                        }
+                    }
+                });
+            }
+        }
     }
 
     @Override
@@ -105,11 +154,27 @@ public class IdGenerateServiceImpl implements IdGenerateService, InitializingBea
     }
 
     private void tryUpdateMySQLRecord(IdGeneratePO idGeneratePO) {
+        int updateResult = idGenerateMapper.updateNewIdCountAndVersion(idGeneratePO.getId(), idGeneratePO.getVersion());
+        if (updateResult > 0) {
+            localIdBoHandler(idGeneratePO);
+            return;
+        }
+        for (int i = 0; i < 3; i++) {
+            idGeneratePO = idGenerateMapper.selectById(idGeneratePO.getId());
+            updateResult = idGenerateMapper.updateNewIdCountAndVersion(idGeneratePO.getId(), idGeneratePO.getVersion());
+            if (updateResult > 0) {
+                localIdBoHandler(idGeneratePO);
+                return;
+            }
+        }
+        throw new RuntimeException("表id段占用失败，竞争过于激烈，id is " + idGeneratePO.getId());
+    }
+
+    private void localIdBoHandler(IdGeneratePO idGeneratePO) {
         long currentStart = idGeneratePO.getCurrentStart();
         long nextThreshold = idGeneratePO.getNextThreshold();
         long currentNum = currentStart;
-        int updateResult = idGenerateMapper.updateNewIdCountAndVersion(idGeneratePO.getId(), idGeneratePO.getVersion());
-        if (updateResult > 0) {
+        if (idGeneratePO.getIsSeq() == SEQ_ID) {
             LocalSeqIdBo localSeqIdBo = new LocalSeqIdBo();
             AtomicLong atomicLong = new AtomicLong(currentNum);
             localSeqIdBo.setId(idGeneratePO.getId());
@@ -117,23 +182,22 @@ public class IdGenerateServiceImpl implements IdGenerateService, InitializingBea
             localSeqIdBo.setCurrentStart(currentNum);
             localSeqIdBo.setNextThreshold(nextThreshold);
             localSeqIdBoMap.put(localSeqIdBo.getId(), localSeqIdBo);
-            return;
-        }
-
-        for (int i = 0; i < 3; i++) {
-            idGeneratePO = idGenerateMapper.selectById(idGeneratePO.getId());
-            updateResult = idGenerateMapper.updateNewIdCountAndVersion(idGeneratePO.getId(), idGeneratePO.getVersion());
-            if (updateResult > 0) {
-                LocalSeqIdBo localSeqIdBo = new LocalSeqIdBo();
-                AtomicLong atomicLong = new AtomicLong(idGeneratePO.getCurrentStart());
-                localSeqIdBo.setId(idGeneratePO.getId());
-                localSeqIdBo.setCurrentNum(atomicLong);
-                localSeqIdBo.setCurrentStart(idGeneratePO.getCurrentStart());
-                localSeqIdBo.setNextThreshold(idGeneratePO.getNextThreshold());
-                localSeqIdBoMap.put(localSeqIdBo.getId(), localSeqIdBo);
-                return;
+        } else {
+            LocalUnSeqIdBo localUnSeqIdBo = new LocalUnSeqIdBo();
+            localUnSeqIdBo.setCurrentStart(currentStart);
+            localUnSeqIdBo.setNextThreshold(nextThreshold);
+            localUnSeqIdBo.setId(idGeneratePO.getId());
+            Long begin = localUnSeqIdBo.getCurrentStart();
+            Long end = localUnSeqIdBo.getNextThreshold();
+            List<Long> idList = new ArrayList<>();
+            for (long i = begin; i < end; i++) {
+                idList.add(i);
             }
+            Collections.shuffle(idList);
+            ConcurrentLinkedQueue<Long> idQueue = new ConcurrentLinkedQueue<>();
+            idQueue.addAll(idList);
+            localUnSeqIdBo.setIdQueue(idQueue);
+            localUnSeqIdBoMap.put(localUnSeqIdBo.getId(), localUnSeqIdBo);
         }
-        throw new RuntimeException("表id段占用失败，竞争过于激烈，id is " + idGeneratePO.getId());
     }
 }
