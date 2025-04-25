@@ -11,6 +11,9 @@ import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.idea.qiyu.live.framework.redis.starter.key.UserProviderCacheKeyBuilder;
+import org.qiyu.live.user.constants.CacheAsyncDeleteCode;
+import org.qiyu.live.user.constants.UserProviderTopicNames;
+import org.qiyu.live.user.dto.UserCacheAsyncDeleteDTO;
 import org.qiyu.live.user.dto.UserDTO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,7 +35,7 @@ public class RocketMQConsumerConfig implements InitializingBean {
     @Resource
     private RedisTemplate<String, Object> redisTemplate;
     @Resource
-    private UserProviderCacheKeyBuilder userProviderCacheKeyBuilder;
+    private UserProviderCacheKeyBuilder cacheKeyBuilder;
 
     @Override
     public void afterPropertiesSet() throws Exception {
@@ -47,23 +50,36 @@ public class RocketMQConsumerConfig implements InitializingBean {
             defaultMQPushConsumer.setConsumerGroup(consumerProperties.getGroupName());
             defaultMQPushConsumer.setConsumeMessageBatchMaxSize(1);
             defaultMQPushConsumer.setConsumeFromWhere(ConsumeFromWhere.CONSUME_FROM_FIRST_OFFSET);
-            defaultMQPushConsumer.subscribe("user-update-cache","*");
+            defaultMQPushConsumer.subscribe(UserProviderTopicNames.CACHE_ASYNC_DELETE_TOPIC, "*");
             defaultMQPushConsumer.setMessageListener(new MessageListenerConcurrently() {
                 @Override
                 public ConsumeConcurrentlyStatus consumeMessage(List<MessageExt> msgs, ConsumeConcurrentlyContext consumeConcurrentlyContext) {
-                    String msgStr = new String(msgs.get(0).getBody());
-                    UserDTO userDTO = JSON.parseObject(msgStr, UserDTO.class);
-                    if (userDTO == null || userDTO.getUserId() == null){
-                        logger.error("用户id为空，参数异常，内容：{}", msgStr);
-                        return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+                    String json = new String(msgs.get(0).getBody());
+                    UserCacheAsyncDeleteDTO userCacheAsyncDeleteDTO = JSON.parseObject(json, UserCacheAsyncDeleteDTO.class);
+                    if (CacheAsyncDeleteCode.USER_INFO_DELETE.getCode() == userCacheAsyncDeleteDTO.getCode()) {
+                        Long userId = JSON.parseObject(userCacheAsyncDeleteDTO.getJson()).getLong("userId");
+                        redisTemplate.delete(cacheKeyBuilder.buildUserInfoKey(userId));
+                        logger.info("延迟删除用户信息缓存，userId is {}", userId);
+                    } else if (CacheAsyncDeleteCode.USER_TAG_DELETE.getCode() == userCacheAsyncDeleteDTO.getCode()) {
+                        Long userId = JSON.parseObject(userCacheAsyncDeleteDTO.getJson()).getLong("userId");
+                        redisTemplate.delete(cacheKeyBuilder.buildTagKey(userId));
+                        logger.info("延迟删除用户标签缓存，userId is {}", userId);
                     }
-                    redisTemplate.delete(userProviderCacheKeyBuilder.buildUserInfoKey(userDTO.getUserId()));
-                    logger.info("延迟删除处理，userDTO is {}", userDTO);
                     return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+
+//                    String msgStr = new String(msgs.get(0).getBody());
+//                    UserDTO userDTO = JSON.parseObject(msgStr, UserDTO.class);
+//                    if (userDTO == null || userDTO.getUserId() == null){
+//                        logger.error("用户id为空，参数异常，内容：{}", msgStr);
+//                        return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+//                    }
+//                    redisTemplate.delete(userProviderCacheKeyBuilder.buildUserInfoKey(userDTO.getUserId()));
+//                    logger.info("延迟删除处理，userDTO is {}", userDTO);
+//                    return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
                 }
             });
             defaultMQPushConsumer.start();
-            logger.info("mq消费者启动成功,nameSrv is {}",consumerProperties.getNameSer());
+            logger.info("mq消费者启动成功,nameSrv is {}", consumerProperties.getNameSer());
         } catch (MQClientException e) {
             throw new RuntimeException(e);
         }

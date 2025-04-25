@@ -10,6 +10,9 @@ import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.remoting.exception.RemotingException;
 import org.idea.qiyu.live.framework.redis.starter.key.UserProviderCacheKeyBuilder;
 import org.qiyu.live.common.interfaces.ConvertBeanUtils;
+import org.qiyu.live.user.constants.CacheAsyncDeleteCode;
+import org.qiyu.live.user.constants.UserProviderTopicNames;
+import org.qiyu.live.user.dto.UserCacheAsyncDeleteDTO;
 import org.qiyu.live.user.dto.UserDTO;
 import org.qiyu.live.user.provider.dao.mapper.IUserMapper;
 import org.qiyu.live.user.provider.dao.po.UserPO;
@@ -21,10 +24,7 @@ import org.springframework.data.redis.core.SessionCallback;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
@@ -71,9 +71,16 @@ public class UserServiceImpl implements IUserService {
         String key = userProviderCacheKeyBuilder.buildUserInfoKey(userDTO.getUserId());
         redisTemplate.delete(key);
         try {
+
+            UserCacheAsyncDeleteDTO userCacheAsyncDeleteDTO = new UserCacheAsyncDeleteDTO();
+            userCacheAsyncDeleteDTO.setCode(CacheAsyncDeleteCode.USER_INFO_DELETE.getCode());
+            Map<String,Object> jsonParam = new HashMap<>();
+            jsonParam.put("userId", userDTO.getUserId());
+            userCacheAsyncDeleteDTO.setJson(JSON.toJSONString(jsonParam));
+
             Message message = new Message();
-            message.setBody(JSON.toJSONString(userDTO).getBytes());
-            message.setTopic("user-update-cache");
+            message.setBody(JSON.toJSONString(userCacheAsyncDeleteDTO).getBytes());
+            message.setTopic(UserProviderTopicNames.CACHE_ASYNC_DELETE_TOPIC);
             message.setDelayTimeLevel(1);
             mqProducer.send(message);
         } catch (Exception e) {
